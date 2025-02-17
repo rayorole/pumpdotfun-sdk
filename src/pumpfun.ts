@@ -40,6 +40,7 @@ import {
   sendTx,
 } from "./util";
 import { PumpFun, IDL } from "./IDL";
+import { JitoConfig } from "./jito";
 const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const MPL_TOKEN_METADATA_PROGRAM_ID =
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
@@ -59,7 +60,7 @@ export class PumpFunSDK {
     this.connection = this.program.provider.connection;
   }
 
-  async createAndBuy (
+  async createAndBuy(
     creator: Keypair,
     mint: Keypair,
     createTokenMetadata: CreateTokenMetadata,
@@ -67,7 +68,8 @@ export class PumpFunSDK {
     slippageBasisPoints: bigint = 500n,
     priorityFees?: PriorityFee,
     commitment: Commitment = DEFAULT_COMMITMENT,
-    finality: Finality = DEFAULT_FINALITY
+    finality: Finality = DEFAULT_FINALITY,
+    jitoConfig?: JitoConfig
   ): Promise<TransactionResult> {
     let tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
 
@@ -107,7 +109,10 @@ export class PumpFunSDK {
       [creator, mint],
       priorityFees,
       commitment,
-      finality
+      finality,
+      jitoConfig?.jitoEnabled,
+      jitoConfig?.tipLampports,
+      jitoConfig?.endpoint
     );
     return createResults;
   }
@@ -395,11 +400,11 @@ export class PumpFunSDK {
   async createTokenMetadata(create: CreateTokenMetadata) {
     // Validate file
     if (!(create.file instanceof Blob)) {
-        throw new Error('File must be a Blob or File object');
+      throw new Error("File must be a Blob or File object");
     }
 
     let formData = new FormData();
-    formData.append("file", create.file, 'image.png'); // Add filename
+    formData.append("file", create.file, "image.png"); // Add filename
     formData.append("name", create.name);
     formData.append("symbol", create.symbol);
     formData.append("description", create.description);
@@ -409,40 +414,42 @@ export class PumpFunSDK {
     formData.append("showName", "true");
 
     try {
-        const request = await fetch("https://pump.fun/api/ipfs", {
-            method: "POST",
-            headers: {
-                'Accept': 'application/json',
-            },
-            body: formData,
-            credentials: 'same-origin'
-        });
+      const request = await fetch("https://pump.fun/api/ipfs", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+        },
+        body: formData,
+        credentials: "same-origin",
+      });
 
-        if (request.status === 500) {
-            // Try to get more error details
-            const errorText = await request.text();
-            throw new Error(`Server error (500): ${errorText || 'No error details available'}`);
-        }
+      if (request.status === 500) {
+        // Try to get more error details
+        const errorText = await request.text();
+        throw new Error(
+          `Server error (500): ${errorText || "No error details available"}`
+        );
+      }
 
-        if (!request.ok) {
-            throw new Error(`HTTP error! status: ${request.status}`);
-        }
+      if (!request.ok) {
+        throw new Error(`HTTP error! status: ${request.status}`);
+      }
 
-        const responseText = await request.text();
-        if (!responseText) {
-            throw new Error('Empty response received from server');
-        }
+      const responseText = await request.text();
+      if (!responseText) {
+        throw new Error("Empty response received from server");
+      }
 
-        try {
-            return JSON.parse(responseText);
-        } catch (e) {
-            throw new Error(`Invalid JSON response: ${responseText}`);
-        }
+      try {
+        return JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Invalid JSON response: ${responseText}`);
+      }
     } catch (error) {
-        console.error('Error in createTokenMetadata:', error);
-        throw error;
+      console.error("Error in createTokenMetadata:", error);
+      throw error;
     }
-}
+  }
   //EVENTS
   addEventListener<T extends PumpFunEventType>(
     eventType: T,

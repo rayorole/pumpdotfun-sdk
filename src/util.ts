@@ -6,12 +6,20 @@ import {
   Keypair,
   PublicKey,
   SendTransactionError,
+  SystemProgram,
   Transaction,
   TransactionMessage,
   VersionedTransaction,
   VersionedTransactionResponse,
 } from "@solana/web3.js";
 import { PriorityFee, TransactionResult } from "./types";
+import {
+  getRandomJitoMainnetEndpoint,
+  getRandomTipAccount,
+  JitoEndpoint,
+  sendBundle,
+  TIP_LAMPORTS,
+} from "./jito";
 
 export const DEFAULT_COMMITMENT: Commitment = "finalized";
 export const DEFAULT_FINALITY: Finality = "finalized";
@@ -37,7 +45,10 @@ export async function sendTx(
   signers: Keypair[],
   priorityFees?: PriorityFee,
   commitment: Commitment = DEFAULT_COMMITMENT,
-  finality: Finality = DEFAULT_FINALITY
+  finality: Finality = DEFAULT_FINALITY,
+  jito: boolean = true,
+  tipLampports: number = TIP_LAMPORTS,
+  jitoEndpoint?: JitoEndpoint
 ): Promise<TransactionResult> {
   let newTx = new Transaction();
 
@@ -53,15 +64,46 @@ export async function sendTx(
     newTx.add(addPriorityFee);
   }
 
+  if (jito) {
+    const TIP_ACCOUNT = getRandomTipAccount();
+    const tipAccountPubkey = new PublicKey(TIP_ACCOUNT);
+    const tipInstruction = SystemProgram.transfer({
+      fromPubkey: payer,
+      toPubkey: tipAccountPubkey,
+      lamports: tipLampports,
+    });
+    newTx.add(tipInstruction);
+  }
+
   newTx.add(tx);
 
-  let versionedTx = await buildVersionedTx(connection, payer, newTx, commitment);
+  let versionedTx = await buildVersionedTx(
+    connection,
+    payer,
+    newTx,
+    commitment
+  );
   versionedTx.sign(signers);
 
   try {
-    const sig = await connection.sendTransaction(versionedTx, {
-      skipPreflight: false,
-    });
+    let sig: string;
+    if (jito) {
+      const serializedTx = Buffer.from(versionedTx.serialize()).toString(
+        "base64"
+      );
+      const endpoint = jitoEndpoint || getRandomJitoMainnetEndpoint();
+      const response = await sendBundle([serializedTx], endpoint);
+
+      if (response.error) {
+        throw new Error(`Jito bundle error: ${JSON.stringify(response.error)}`);
+      }
+      sig = response.result;
+    } else {
+      sig = await connection.sendTransaction(versionedTx, {
+        skipPreflight: false,
+      });
+    }
+
     console.log("sig:", `https://solscan.io/tx/${sig}`);
 
     let txResult = await getTxDetails(connection, sig, commitment, finality);
@@ -79,7 +121,7 @@ export async function sendTx(
   } catch (e) {
     if (e instanceof SendTransactionError) {
       let ste = e as SendTransactionError;
-      console.log("SendTransactionError" + await ste.getLogs(connection));
+      console.log("SendTransactionError" + (await ste.getLogs(connection)));
     } else {
       console.error(e);
     }
@@ -96,8 +138,7 @@ export const buildVersionedTx = async (
   tx: Transaction,
   commitment: Commitment = DEFAULT_COMMITMENT
 ): Promise<VersionedTransaction> => {
-  const blockHash = (await connection.getLatestBlockhash(commitment))
-    .blockhash;
+  const blockHash = (await connection.getLatestBlockhash(commitment)).blockhash;
 
   let messageV0 = new TransactionMessage({
     payerKey: payer,
