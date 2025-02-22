@@ -5,6 +5,7 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  SystemProgram,
 } from "@solana/web3.js";
 import { Program, Provider } from "@coral-xyz/anchor";
 import { GlobalAccount } from "./globalAccount";
@@ -36,12 +37,19 @@ import { BN } from "bn.js";
 import {
   DEFAULT_COMMITMENT,
   DEFAULT_FINALITY,
+  buildVersionedTx,
   calculateWithSlippageBuy,
   calculateWithSlippageSell,
   sendTx,
 } from "./util";
 import { PumpFun, IDL } from "./IDL";
-import { JitoConfig } from "./jito";
+import {
+  getRandomJitoMainnetEndpoint,
+  getRandomTipAccount,
+  JitoConfig,
+  sendBundle,
+  TIP_LAMPORTS,
+} from "./jito";
 const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const MPL_TOKEN_METADATA_PROGRAM_ID =
   "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
@@ -52,6 +60,8 @@ export const BONDING_CURVE_SEED = "bonding-curve";
 export const METADATA_SEED = "metadata";
 
 export const DEFAULT_DECIMALS = 6;
+
+export const MAX_BUNDLED_BUYS_PER_TX = 4; // Adjust this number based on testing
 
 interface CreateAndBuyParams {
   creator: Keypair;
@@ -110,6 +120,11 @@ export class PumpFunSDK {
   }: CreateAndBuyParams): Promise<TransactionResult> {
     let tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
 
+    // Create all transactions but don't send them yet
+    const allTransactions: Transaction[] = [];
+    const allSigners: Keypair[][] = [];
+
+    // First transaction: Create token and initial buy
     let createTx = await this.getCreateInstructions(
       creator.publicKey,
       createTokenMetadata.name,
@@ -118,7 +133,21 @@ export class PumpFunSDK {
       mint
     );
 
-    let newTx = new Transaction().add(createTx);
+    let firstTx = new Transaction();
+
+    // Add Jito tip instruction if enabled
+    if (jitoConfig?.jitoEnabled) {
+      const tipAccount = new PublicKey(getRandomTipAccount());
+      firstTx.add(
+        SystemProgram.transfer({
+          fromPubkey: creator.publicKey,
+          toPubkey: tipAccount,
+          lamports: jitoConfig.tipLampports || TIP_LAMPORTS,
+        })
+      );
+    }
+
+    firstTx.add(createTx);
 
     if (buyAmountSol > 0) {
       const globalAccount = await this.getGlobalAccount(commitment);
@@ -136,52 +165,125 @@ export class PumpFunSDK {
         buyAmountWithSlippage
       );
 
-      newTx.add(buyTx);
+      firstTx.add(buyTx);
     }
 
-    // add bundled buys
-    if (bundledBuys) {
-      for (const buy of bundledBuys) {
+    allTransactions.push(firstTx);
+    allSigners.push([creator, mint]);
+
+    // Process bundled buys in batches
+    if (bundledBuys && bundledBuys.length > 0) {
+      const batches: BundledBuy[][] = [];
+      for (let i = 0; i < bundledBuys.length; i += MAX_BUNDLED_BUYS_PER_TX) {
+        batches.push(bundledBuys.slice(i, i + MAX_BUNDLED_BUYS_PER_TX));
+      }
+
+      for (const batch of batches) {
+        const batchTx = new Transaction();
         const globalAccount = await this.getGlobalAccount(commitment);
-        const buyAmount = globalAccount.getInitialBuyPrice(buy.amountInSol);
-        const buyAmountWithSlippage = calculateWithSlippageBuy(
-          buy.amountInSol,
-          slippageBasisPoints
-        );
 
-        console.log("Bundled buy amount:", buyAmount.toString());
-        console.log("Max SOL with slippage:", buyAmountWithSlippage.toString());
+        // Add Jito tip instruction for each batch transaction if enabled
+        if (jitoConfig?.jitoEnabled) {
+          const tipAccount = new PublicKey(getRandomTipAccount());
+          batchTx.add(
+            SystemProgram.transfer({
+              fromPubkey: batch[0].signer.publicKey,
+              toPubkey: tipAccount,
+              lamports: jitoConfig.tipLampports || TIP_LAMPORTS,
+            })
+          );
+        }
 
-        newTx.add(
-          await this.getBuyInstructions(
-            buy.signer.publicKey,
-            mint.publicKey,
-            globalAccount.feeRecipient,
-            buyAmount,
-            buyAmountWithSlippage
-          )
-        );
+        for (const buy of batch) {
+          const buyAmount = globalAccount.getInitialBuyPrice(buy.amountInSol);
+          const buyAmountWithSlippage = calculateWithSlippageBuy(
+            buy.amountInSol,
+            slippageBasisPoints
+          );
+
+          batchTx.add(
+            await this.getBuyInstructions(
+              buy.signer.publicKey,
+              mint.publicKey,
+              globalAccount.feeRecipient,
+              buyAmount,
+              buyAmountWithSlippage
+            )
+          );
+        }
+
+        allTransactions.push(batchTx);
+        allSigners.push(batch.map((buy) => buy.signer));
       }
     }
 
-    const signers = [creator, mint];
-    if (bundledBuys) {
-      signers.push(...bundledBuys.map((buy) => buy.signer));
-    }
+    // If using Jito, send all transactions as a bundle
+    if (jitoConfig?.jitoEnabled) {
+      const serializedTxs: string[] = [];
 
-    let createResults = await sendTx(
-      this.connection,
-      newTx,
-      creator.publicKey,
-      signers,
-      priorityFees,
-      commitment,
-      finality,
-      jitoConfig?.jitoEnabled,
-      jitoConfig?.tipLampports,
-      jitoConfig?.endpoint
-    );
-    return createResults;
+      for (let i = 0; i < allTransactions.length; i++) {
+        const tx = allTransactions[i];
+        const signers = allSigners[i];
+        const payer = signers[0];
+
+        const versionedTx = await buildVersionedTx(
+          this.connection,
+          payer.publicKey,
+          tx,
+          commitment
+        );
+        versionedTx.sign(signers);
+
+        serializedTxs.push(
+          Buffer.from(versionedTx.serialize()).toString("base64")
+        );
+      }
+
+      const endpoint = jitoConfig.endpoint || getRandomJitoMainnetEndpoint();
+      const response = await sendBundle(serializedTxs, endpoint);
+
+      if (response.error) {
+        return {
+          success: false,
+          error: new Error(
+            `Jito bundle error: ${JSON.stringify(response.error)}`
+          ),
+        };
+      }
+
+      return {
+        success: true,
+        signature: response.result,
+      };
+    }
+    // If not using Jito, send transactions sequentially
+    else {
+      let result0: TransactionResult | undefined;
+      for (let i = 0; i < allTransactions.length; i++) {
+        const tx = allTransactions[i];
+        const signers = allSigners[i];
+        const payer = signers[0];
+
+        const result = await sendTx(
+          this.connection,
+          tx,
+          payer.publicKey,
+          signers,
+          priorityFees,
+          commitment,
+          finality
+        );
+
+        if (!result.success) {
+          return result;
+        }
+        if (i === 0) {
+          result0 = result;
+        }
+      }
+
+      return result0!;
+    }
   }
 
   async buy({

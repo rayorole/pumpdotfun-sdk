@@ -91,7 +91,7 @@ const main = async () => {
       },
       bundledBuys: [
         {
-          amountInSol: BigInt(0.01 * LAMPORTS_PER_SOL),
+          amountInSol: BigInt(0.005 * LAMPORTS_PER_SOL),
           signer: bundler,
         },
       ],
