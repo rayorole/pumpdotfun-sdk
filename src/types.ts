@@ -1,4 +1,13 @@
-import { PublicKey, VersionedTransactionResponse } from "@solana/web3.js";
+import {
+  PublicKey,
+  VersionedTransactionResponse,
+  Keypair,
+} from "@solana/web3.js";
+
+export type BundledBuy = {
+  signer: Keypair;
+  amountInSol: bigint;
+};
 
 export type CreateTokenMetadata = {
   name: string;

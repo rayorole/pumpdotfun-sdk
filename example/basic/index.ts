@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import fs from "fs";
 import { Connection, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { DEFAULT_DECIMALS, PumpFunSDK } from "../../src";
+import { CreateTokenMetadata, DEFAULT_DECIMALS, PumpFunSDK } from "../../src";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import {
@@ -10,9 +10,10 @@ import {
   printSOLBalance,
   printSPLBalance,
 } from "../util";
+import { TransactionError } from "../../src/util";
 
 const KEYS_FOLDER = __dirname + "/.keys";
-const SLIPPAGE_BASIS_POINTS = 100n;
+const SLIPPAGE_BASIS_POINTS = 500n; // This is 5%
 
 //create token example:
 //https://solscan.io/tx/bok9NgPeoJPtYQHoDqJZyRDmY88tHbPcAk1CJJsKV3XEhHpaTZhUCG3mA9EQNXcaUfNSgfPkuVbEsKMp6H7D9NY
@@ -40,6 +41,7 @@ const main = async () => {
 
   const testAccount = getOrCreateKeypair(KEYS_FOLDER, "test-account");
   const mint = getOrCreateKeypair(KEYS_FOLDER, "mint");
+  const bundler = getOrCreateKeypair(KEYS_FOLDER, "bundler");
 
   await printSOLBalance(
     connection,
@@ -63,34 +65,58 @@ const main = async () => {
 
   console.log(await sdk.getGlobalAccount());
 
-  //Check if mint already exists
+  // Check if mint already exists
   let boundingCurveAccount = await sdk.getBondingCurveAccount(mint.publicKey);
   if (!boundingCurveAccount) {
-    let tokenMetadata = {
+    let tokenMetadata: CreateTokenMetadata = {
       name: "TST-7",
       symbol: "TST-7",
       description: "TST-7: This is a test token",
       file: await fs.openAsBlob("example/basic/random.png"),
     };
 
-    let createResults = await sdk.createAndBuy(
-      testAccount,
+    let createResults = await sdk.createAndBuy({
+      creator: testAccount,
       mint,
-      tokenMetadata,
-      BigInt(0.0001 * LAMPORTS_PER_SOL),
-      SLIPPAGE_BASIS_POINTS,
-      {
-        unitLimit: 250000,
-        unitPrice: 250000,
+      createTokenMetadata: tokenMetadata,
+      buyAmountSol: BigInt(0.0001 * LAMPORTS_PER_SOL),
+      slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+      priorityFees: {
+        unitLimit: 300000,
+        unitPrice: 200000,
       },
-    );
+      jitoConfig: {
+        jitoEnabled: false,
+        tipLampports: 0.001 * LAMPORTS_PER_SOL,
+      },
+      bundledBuys: [
+        {
+          amountInSol: BigInt(0.01 * LAMPORTS_PER_SOL),
+          signer: bundler,
+        },
+      ],
+    });
 
-    if (createResults.success) {
-      console.log("Success:", `https://pump.fun/${mint.publicKey.toBase58()}`);
-      boundingCurveAccount = await sdk.getBondingCurveAccount(mint.publicKey);
-      console.log("Bonding curve after create and buy", boundingCurveAccount);
-      printSPLBalance(connection, mint.publicKey, testAccount.publicKey);
+    if (!createResults.success) {
+      if (createResults.error instanceof TransactionError) {
+        console.error("Transaction failed:");
+        console.error(createResults.error.toString());
+        if (createResults.error.errorLogs) {
+          console.error("Detailed error logs:", createResults.error.errorLogs);
+        }
+      } else {
+        console.error("Unknown error:", createResults.error);
+      }
+      return;
     }
+
+    console.log("Success:", `https://pump.fun/${mint.publicKey.toBase58()}`);
+    boundingCurveAccount = await sdk.getBondingCurveAccount(
+      mint.publicKey,
+      "processed"
+    );
+    console.log("Bonding curve after create and buy", boundingCurveAccount);
+    printSPLBalance(connection, mint.publicKey, testAccount.publicKey);
   } else {
     console.log("boundingCurveAccount", boundingCurveAccount);
     console.log("Success:", `https://pump.fun/${mint.publicKey.toBase58()}`);
@@ -99,20 +125,23 @@ const main = async () => {
 
   if (boundingCurveAccount) {
     //buy 0.0001 SOL worth of tokens
-    let buyResults = await sdk.buy(
-      testAccount,
-      mint.publicKey,
-      BigInt(0.0001 * LAMPORTS_PER_SOL),
-      SLIPPAGE_BASIS_POINTS,
-      {
+    let buyResults = await sdk.buy({
+      buyer: testAccount,
+      mint: mint.publicKey,
+      buyAmountSol: BigInt(0.0001 * LAMPORTS_PER_SOL),
+      slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+      priorityFees: {
         unitLimit: 250000,
         unitPrice: 250000,
       },
-    );
+    });
 
     if (buyResults.success) {
       printSPLBalance(connection, mint.publicKey, testAccount.publicKey);
-      console.log("Bonding curve after buy", await sdk.getBondingCurveAccount(mint.publicKey));
+      console.log(
+        "Bonding curve after buy",
+        await sdk.getBondingCurveAccount(mint.publicKey)
+      );
     } else {
       console.log("Buy failed");
     }
@@ -125,16 +154,18 @@ const main = async () => {
     );
     console.log("currentSPLBalance", currentSPLBalance);
     if (currentSPLBalance) {
-      let sellResults = await sdk.sell(
-        testAccount,
-        mint.publicKey,
-        BigInt(currentSPLBalance * Math.pow(10, DEFAULT_DECIMALS)),
-        SLIPPAGE_BASIS_POINTS,
-        {
+      let sellResults = await sdk.sell({
+        seller: testAccount,
+        mint: mint.publicKey,
+        sellTokenAmount: BigInt(
+          currentSPLBalance * Math.pow(10, DEFAULT_DECIMALS)
+        ),
+        slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+        priorityFees: {
           unitLimit: 250000,
           unitPrice: 250000,
         },
-      );
+      });
       if (sellResults.success) {
         await printSOLBalance(
           connection,
@@ -142,8 +173,16 @@ const main = async () => {
           "Test Account keypair"
         );
 
-        printSPLBalance(connection, mint.publicKey, testAccount.publicKey, "After SPL sell all");
-        console.log("Bonding curve after sell", await sdk.getBondingCurveAccount(mint.publicKey));
+        printSPLBalance(
+          connection,
+          mint.publicKey,
+          testAccount.publicKey,
+          "After SPL sell all"
+        );
+        console.log(
+          "Bonding curve after sell",
+          await sdk.getBondingCurveAccount(mint.publicKey)
+        );
       } else {
         console.log("Sell failed");
       }

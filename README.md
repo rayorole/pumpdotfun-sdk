@@ -10,348 +10,221 @@ The `PumpDotFunSDK` is designed to interact with the Pump.fun decentralized appl
 
 ## Installation
 
-`
-npm i pumpdotfun-sdk
-`
+```bash
+npm i pumpdotfun-jito-sdk
+```
 
 ## Usage Example
 
 First you need to create a `.env` file and set your RPC URL like in the `.env.example`
 
-Then you need to fund an account with atleast 0.004 SOL that is generated when running the command below
+Then you need to fund an account with at least 0.004 SOL that is generated when running the command below
 
-`
+```bash
 npx ts-node example/basic/index.ts
-`
+```
 
-```typescript
+### Basic Example
+
+````typescript
 import dotenv from "dotenv";
+import fs from "fs";
 import { Connection, Keypair, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { DEFAULT_DECIMALS, PumpFunSDK } from "pumpdotfun-sdk";
+import { CreateTokenMetadata, DEFAULT_DECIMALS, PumpFunSDK } from "pumpdotfun-sdk";
 import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
 import { AnchorProvider } from "@coral-xyz/anchor";
-import {
-  getOrCreateKeypair,
-  getSPLBalance,
-  printSOLBalance,
-  printSPLBalance,
-} from "./util";
 
 dotenv.config();
 
 const KEYS_FOLDER = __dirname + "/.keys";
-const SLIPPAGE_BASIS_POINTS = 100n;
+const SLIPPAGE_BASIS_POINTS = 500n; // 5%
 
-const getProvider = () => {
+const main = async () => {
   if (!process.env.HELIUS_RPC_URL) {
     throw new Error("Please set HELIUS_RPC_URL in .env file");
   }
 
-  const connection = new Connection(process.env.HELIUS_RPC_URL || "");
+  const connection = new Connection(process.env.HELIUS_RPC_URL);
   const wallet = new NodeWallet(new Keypair());
-  return new AnchorProvider(connection, wallet, { commitment: "finalized" });
-};
+  const provider = new AnchorProvider(connection, wallet, {
+    commitment: "finalized",
+  });
 
-const createAndBuyToken = async (sdk, testAccount, mint) => {
-  const tokenMetadata = {
+  const testAccount = getOrCreateKeypair(KEYS_FOLDER, "test-account");
+  const mint = getOrCreateKeypair(KEYS_FOLDER, "mint");
+  const bundler = getOrCreateKeypair(KEYS_FOLDER, "bundler");
+
+  const sdk = new PumpFunSDK(provider);
+
+  // Create and buy token
+  const tokenMetadata: CreateTokenMetadata = {
     name: "TST-7",
     symbol: "TST-7",
     description: "TST-7: This is a test token",
-    filePath: "example/basic/random.png",
+    file: await fs.openAsBlob("example/basic/random.png"),
   };
 
-  const createResults = await sdk.createAndBuy(
-    testAccount,
+  const createResults = await sdk.createAndBuy({
+    creator: testAccount,
     mint,
-    tokenMetadata,
-    BigInt(0.0001 * LAMPORTS_PER_SOL),
-    SLIPPAGE_BASIS_POINTS,
-    {
-      unitLimit: 250000,
-      unitPrice: 250000,
-    }
-  );
-
-  if (createResults.success) {
-    console.log("Success:", `https://pump.fun/${mint.publicKey.toBase58()}`);
-    printSPLBalance(sdk.connection, mint.publicKey, testAccount.publicKey);
-  } else {
-    console.log("Create and Buy failed");
-  }
-};
-
-const buyTokens = async (sdk, testAccount, mint) => {
-  const buyResults = await sdk.buy(
-    testAccount,
-    mint.publicKey,
-    BigInt(0.0001 * LAMPORTS_PER_SOL),
-    SLIPPAGE_BASIS_POINTS,
-    {
-      unitLimit: 250000,
-      unitPrice: 250000,
-    }
-  );
-
-  if (buyResults.success) {
-    printSPLBalance(sdk.connection, mint.publicKey, testAccount.publicKey);
-    console.log("Bonding curve after buy", await sdk.getBondingCurveAccount(mint.publicKey));
-  } else {
-    console.log("Buy failed");
-  }
-};
-
-const sellTokens = async (sdk, testAccount, mint) => {
-  const currentSPLBalance = await getSPLBalance(
-    sdk.connection,
-    mint.publicKey,
-    testAccount.publicKey
-  );
-  console.log("currentSPLBalance", currentSPLBalance);
-
-  if (currentSPLBalance) {
-    const sellResults = await sdk.sell(
-      testAccount,
-      mint.publicKey,
-      BigInt(currentSPLBalance * Math.pow(10, DEFAULT_DECIMALS)),
-      SLIPPAGE_BASIS_POINTS,
+    createTokenMetadata: tokenMetadata,
+    buyAmountSol: BigInt(0.0001 * LAMPORTS_PER_SOL),
+    slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+    priorityFees: {
+      unitLimit: 300000,
+      unitPrice: 200000,
+    },
+    jitoConfig: {
+      jitoEnabled: false,
+      tipLampports: 0.001 * LAMPORTS_PER_SOL,
+    },
+    bundledBuys: [
       {
-        unitLimit: 250000,
-        unitPrice: 250000,
-      }
-    );
+        amountInSol: BigInt(0.01 * LAMPORTS_PER_SOL),
+        signer: bundler,
+      },
+    ],
+  });
 
-    if (sellResults.success) {
-      await printSOLBalance(sdk.connection, testAccount.publicKey, "Test Account keypair");
-      printSPLBalance(sdk.connection, mint.publicKey, testAccount.publicKey, "After SPL sell all");
-      console.log("Bonding curve after sell", await sdk.getBondingCurveAccount(mint.publicKey));
-    } else {
-      console.log("Sell failed");
-    }
-  }
+  // Buy more tokens
+  const buyResults = await sdk.buy({
+    buyer: testAccount,
+    mint: mint.publicKey,
+    buyAmountSol: BigInt(0.0001 * LAMPORTS_PER_SOL),
+    slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+    priorityFees: {
+      unitLimit: 250000,
+      unitPrice: 250000,
+    },
+    jitoConfig: {
+      jitoEnabled: false,
+      tipLampports: 0.001 * LAMPORTS_PER_SOL,
+    },
+  });
+
+  // Sell tokens
+  const sellResults = await sdk.sell({
+    seller: testAccount,
+    mint: mint.publicKey,
+    sellTokenAmount: BigInt(currentSPLBalance * Math.pow(10, DEFAULT_DECIMALS)),
+    slippageBasisPoints: SLIPPAGE_BASIS_POINTS,
+    priorityFees: {
+      unitLimit: 250000,
+      unitPrice: 250000,
+    },
+    jitoConfig: {
+      jitoEnabled: false,
+      tipLampports: 0.001 * LAMPORTS_PER_SOL,
+    },
+  });
 };
-
-const main = async () => {
-  try {
-    const provider = getProvider();
-    const sdk = new PumpFunSDK(provider);
-    const connection = provider.connection;
-
-    const testAccount = getOrCreateKeypair(KEYS_FOLDER, "test-account");
-    const mint = getOrCreateKeypair(KEYS_FOLDER, "mint");
-
-    await printSOLBalance(connection, testAccount.publicKey, "Test Account keypair");
-
-    const globalAccount = await sdk.getGlobalAccount();
-    console.log(globalAccount);
-
-    const currentSolBalance = await connection.getBalance(testAccount.publicKey);
-    if (currentSolBalance === 0) {
-      console.log("Please send some SOL to the test-account:", testAccount.publicKey.toBase58());
-      return;
-    }
-
-    console.log(await sdk.getGlobalAccount());
-
-    let bondingCurveAccount = await sdk.getBondingCurveAccount(mint.publicKey);
-    if (!bondingCurveAccount) {
-      await createAndBuyToken(sdk, testAccount, mint);
-      bondingCurveAccount = await sdk.getBondingCurveAccount(mint.publicKey);
-    }
-
-    if (bondingCurveAccount) {
-      await buyTokens(sdk, testAccount, mint);
-      await sellTokens(sdk, testAccount, mint);
-    }
-  } catch (error) {
-    console.error("An error occurred:", error);
-  }
-};
-
-main();
-```
-
 
 ### PumpDotFunSDK Class
 
 The `PumpDotFunSDK` class provides methods to interact with the PumpFun protocol. Below are the method signatures and their descriptions.
 
+#### Types
+
+```typescript
+interface JitoConfig {
+  jitoEnabled: boolean;
+  tipLampports?: number;
+  endpoint?: string;
+}
+
+interface PriorityFee {
+  unitPrice: number;
+  unitLimit: number;
+}
+
+interface CreateTokenMetadata {
+  name: string;
+  symbol: string;
+  description: string;
+  file: Blob;
+  twitter?: string;
+  telegram?: string;
+  website?: string;
+}
+
+interface BundledBuy {
+  amountInSol: bigint;
+  signer: Keypair;
+}
+````
 
 #### createAndBuy
 
 ```typescript
-async createAndBuy(
-  creator: Keypair,
-  mint: Keypair,
-  createTokenMetadata: CreateTokenMetadata,
-  buyAmountSol: bigint,
-  slippageBasisPoints: bigint = 500n,
-  priorityFees?: PriorityFee,
-  commitment: Commitment = DEFAULT_COMMITMENT,
-  finality: Finality = DEFAULT_FINALITY
-): Promise<TransactionResult>
+interface CreateAndBuyParams {
+  creator: Keypair;
+  mint: Keypair;
+  createTokenMetadata: CreateTokenMetadata;
+  buyAmountSol: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+  bundledBuys?: BundledBuy[];
+}
+
+async createAndBuy(params: CreateAndBuyParams): Promise<TransactionResult>
 ```
 
-- Creates a new token and buys it.
-- **Parameters**:
-  - `creator`: The keypair of the token creator.
-  - `mint`: The keypair of the mint account.
-  - `createTokenMetadata`: Metadata for the token.
-  - `buyAmountSol`: Amount of SOL to buy.
-  - `slippageBasisPoints`: Slippage in basis points (default: 500).
-  - `priorityFees`: Priority fees (optional).
-  - `commitment`: Commitment level (default: DEFAULT_COMMITMENT).
-  - `finality`: Finality level (default: DEFAULT_FINALITY).
-- **Returns**: A promise that resolves to a `TransactionResult`.
+Creates a new token and optionally buys it. Can include bundled buys from other accounts.
 
 #### buy
 
 ```typescript
-async buy(
-  buyer: Keypair,
-  mint: PublicKey,
-  buyAmountSol: bigint,
-  slippageBasisPoints: bigint = 500n,
-  priorityFees?: PriorityFee,
-  commitment: Commitment = DEFAULT_COMMITMENT,
-  finality: Finality = DEFAULT_FINALITY
-): Promise<TransactionResult>
+interface BuyParams {
+  buyer: Keypair;
+  mint: PublicKey;
+  buyAmountSol: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+}
+
+async buy(params: BuyParams): Promise<TransactionResult>
 ```
 
-- Buys a specified amount of tokens.
-- **Parameters**:
-  - `buyer`: The keypair of the buyer.
-  - `mint`: The public key of the mint account.
-  - `buyAmountSol`: Amount of SOL to buy.
-  - `slippageBasisPoints`: Slippage in basis points (default: 500).
-  - `priorityFees`: Priority fees (optional).
-  - `commitment`: Commitment level (default: DEFAULT_COMMITMENT).
-  - `finality`: Finality level (default: DEFAULT_FINALITY).
-- **Returns**: A promise that resolves to a `TransactionResult`.
+Buys a specified amount of tokens.
 
 #### sell
 
 ```typescript
-async sell(
-  seller: Keypair,
-  mint: PublicKey,
-  sellTokenAmount: bigint,
-  slippageBasisPoints: bigint = 500n,
-  priorityFees?: PriorityFee,
-  commitment: Commitment = DEFAULT_COMMITMENT,
-  finality: Finality = DEFAULT_FINALITY
-): Promise<TransactionResult>
+interface SellParams {
+  seller: Keypair;
+  mint: PublicKey;
+  sellTokenAmount: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+}
+
+async sell(params: SellParams): Promise<TransactionResult>
 ```
 
-- Sells a specified amount of tokens.
-- **Parameters**:
-  - `seller`: The keypair of the seller.
-  - `mint`: The public key of the mint account.
-  - `sellTokenAmount`: Amount of tokens to sell.
-  - `slippageBasisPoints`: Slippage in basis points (default: 500).
-  - `priorityFees`: Priority fees (optional).
-  - `commitment`: Commitment level (default: DEFAULT_COMMITMENT).
-  - `finality`: Finality level (default: DEFAULT_FINALITY).
-- **Returns**: A promise that resolves to a `TransactionResult`.
+Sells a specified amount of tokens.
 
-#### addEventListener
+### Jito MEV Configuration
+
+The SDK supports Jito MEV protection through the `jitoConfig` parameter:
 
 ```typescript
-addEventListener<T extends PumpFunEventType>(
-  eventType: T,
-  callback: (event: PumpFunEventHandlers[T], slot: number, signature: string) => void
-): number
-```
-
-- Adds an event listener for the specified event type.
-- **Parameters**:
-  - `eventType`: The type of event to listen for.
-  - `callback`: The callback function to execute when the event occurs.
-- **Returns**: An identifier for the event listener.
-
-#### removeEventListener
-
-```typescript
-removeEventListener(eventId: number): void
-```
-
-- Removes the event listener with the specified identifier.
-- **Parameters**:
-  - `eventId`: The identifier of the event listener to remove.
-
-### Running the Examples
-
-#### Basic Example
-
-To run the basic example for creating, buying, and selling tokens, use the following command:
-
-```bash
-npx ts-node example/basic/index.ts
-```
-
-#### Event Subscription Example
-
-This example demonstrates how to set up event subscriptions using the PumpFun SDK.
-
-#### Script: `example/events/events.ts`
-
-```typescript
-import dotenv from "dotenv";
-import { Connection, Keypair } from "@solana/web3.js";
-import { PumpFunSDK } from "pumpdotfun-sdk";
-import NodeWallet from "@coral-xyz/anchor/dist/cjs/nodewallet";
-import { AnchorProvider } from "@coral-xyz/anchor";
-
-dotenv.config();
-
-const getProvider = () => {
-  if (!process.env.HELIUS_RPC_URL) {
-    throw new Error("Please set HELIUS_RPC_URL in .env file");
-  }
-
-  const connection = new Connection(process.env.HELIUS_RPC_URL || "");
-  const wallet = new NodeWallet(new Keypair());
-  return new AnchorProvider(connection, wallet, { commitment: "finalized" });
+const jitoConfig = {
+  jitoEnabled: true, // Enable Jito MEV protection
+  tipLampports: 0.001 * LAMPORTS_PER_SOL, // Optional tip amount
+  endpoint: "https://jito-api.example.com", // Optional custom endpoint
 };
-
-const setupEventListeners = async (sdk) => {
-  const createEventId = sdk.addEventListener("createEvent", (event, slot, signature) => {
-    console.log("createEvent", event, slot, signature);
-  });
-  console.log("Subscribed to createEvent with ID:", createEventId);
-
-  const tradeEventId = sdk.addEventListener("tradeEvent", (event, slot, signature) => {
-    console.log("tradeEvent", event, slot, signature);
-  });
-  console.log("Subscribed to tradeEvent with ID:", tradeEventId);
-
-  const completeEventId = sdk.addEventListener("completeEvent", (event, slot, signature) => {
-    console.log("completeEvent", event, slot, signature);
-  });
-  console.log("Subscribed to completeEvent with ID:", completeEventId);
-};
-
-const main = async () => {
-  try {
-    const provider = getProvider();
-    const sdk = new PumpFunSDK(provider);
-
-    // Set up event listeners
-    await setupEventListeners(sdk);
-  } catch (error) {
-    console.error("An error occurred:", error);
-  }
-};
-
-main();
 ```
 
-#### Running the Event Subscription Example
-
-To run the event subscription example, use the following command:
-
-```bash
-npx ts-node example/events/events.ts
-```
+Add this configuration to any transaction to enable MEV protection.
 
 ## Contributing
 

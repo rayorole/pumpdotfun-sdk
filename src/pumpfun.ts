@@ -9,6 +9,7 @@ import {
 import { Program, Provider } from "@coral-xyz/anchor";
 import { GlobalAccount } from "./globalAccount";
 import {
+  BundledBuy,
   CompleteEvent,
   CreateEvent,
   CreateTokenMetadata,
@@ -52,6 +53,41 @@ export const METADATA_SEED = "metadata";
 
 export const DEFAULT_DECIMALS = 6;
 
+interface CreateAndBuyParams {
+  creator: Keypair;
+  mint: Keypair;
+  createTokenMetadata: CreateTokenMetadata;
+  buyAmountSol: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+  bundledBuys?: BundledBuy[];
+}
+
+interface BuyParams {
+  buyer: Keypair;
+  mint: PublicKey;
+  buyAmountSol: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+}
+
+interface SellParams {
+  seller: Keypair;
+  mint: PublicKey;
+  sellTokenAmount: bigint;
+  slippageBasisPoints?: bigint;
+  priorityFees?: PriorityFee;
+  commitment?: Commitment;
+  finality?: Finality;
+  jitoConfig?: JitoConfig;
+}
+
 export class PumpFunSDK {
   public program: Program<PumpFun>;
   public connection: Connection;
@@ -60,17 +96,18 @@ export class PumpFunSDK {
     this.connection = this.program.provider.connection;
   }
 
-  async createAndBuy(
-    creator: Keypair,
-    mint: Keypair,
-    createTokenMetadata: CreateTokenMetadata,
-    buyAmountSol: bigint,
-    slippageBasisPoints: bigint = 500n,
-    priorityFees?: PriorityFee,
-    commitment: Commitment = DEFAULT_COMMITMENT,
-    finality: Finality = DEFAULT_FINALITY,
-    jitoConfig?: JitoConfig
-  ): Promise<TransactionResult> {
+  async createAndBuy({
+    creator,
+    mint,
+    createTokenMetadata,
+    buyAmountSol,
+    slippageBasisPoints = 500n,
+    priorityFees,
+    commitment = DEFAULT_COMMITMENT,
+    finality = DEFAULT_FINALITY,
+    jitoConfig,
+    bundledBuys,
+  }: CreateAndBuyParams): Promise<TransactionResult> {
     let tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
 
     let createTx = await this.getCreateInstructions(
@@ -102,11 +139,41 @@ export class PumpFunSDK {
       newTx.add(buyTx);
     }
 
+    // add bundled buys
+    if (bundledBuys) {
+      for (const buy of bundledBuys) {
+        const globalAccount = await this.getGlobalAccount(commitment);
+        const buyAmount = globalAccount.getInitialBuyPrice(buy.amountInSol);
+        const buyAmountWithSlippage = calculateWithSlippageBuy(
+          buy.amountInSol,
+          slippageBasisPoints
+        );
+
+        console.log("Bundled buy amount:", buyAmount.toString());
+        console.log("Max SOL with slippage:", buyAmountWithSlippage.toString());
+
+        newTx.add(
+          await this.getBuyInstructions(
+            buy.signer.publicKey,
+            mint.publicKey,
+            globalAccount.feeRecipient,
+            buyAmount,
+            buyAmountWithSlippage
+          )
+        );
+      }
+    }
+
+    const signers = [creator, mint];
+    if (bundledBuys) {
+      signers.push(...bundledBuys.map((buy) => buy.signer));
+    }
+
     let createResults = await sendTx(
       this.connection,
       newTx,
       creator.publicKey,
-      [creator, mint],
+      signers,
       priorityFees,
       commitment,
       finality,
@@ -117,15 +184,16 @@ export class PumpFunSDK {
     return createResults;
   }
 
-  async buy(
-    buyer: Keypair,
-    mint: PublicKey,
-    buyAmountSol: bigint,
-    slippageBasisPoints: bigint = 500n,
-    priorityFees?: PriorityFee,
-    commitment: Commitment = DEFAULT_COMMITMENT,
-    finality: Finality = DEFAULT_FINALITY
-  ): Promise<TransactionResult> {
+  async buy({
+    buyer,
+    mint,
+    buyAmountSol,
+    slippageBasisPoints = 500n,
+    priorityFees,
+    commitment = DEFAULT_COMMITMENT,
+    finality = DEFAULT_FINALITY,
+    jitoConfig,
+  }: BuyParams): Promise<TransactionResult> {
     let buyTx = await this.getBuyInstructionsBySolAmount(
       buyer.publicKey,
       mint,
@@ -141,20 +209,24 @@ export class PumpFunSDK {
       [buyer],
       priorityFees,
       commitment,
-      finality
+      finality,
+      jitoConfig?.jitoEnabled,
+      jitoConfig?.tipLampports,
+      jitoConfig?.endpoint
     );
     return buyResults;
   }
 
-  async sell(
-    seller: Keypair,
-    mint: PublicKey,
-    sellTokenAmount: bigint,
-    slippageBasisPoints: bigint = 500n,
-    priorityFees?: PriorityFee,
-    commitment: Commitment = DEFAULT_COMMITMENT,
-    finality: Finality = DEFAULT_FINALITY
-  ): Promise<TransactionResult> {
+  async sell({
+    seller,
+    mint,
+    sellTokenAmount,
+    slippageBasisPoints = 500n,
+    priorityFees,
+    commitment = DEFAULT_COMMITMENT,
+    finality = DEFAULT_FINALITY,
+    jitoConfig,
+  }: SellParams): Promise<TransactionResult> {
     let sellTx = await this.getSellInstructionsByTokenAmount(
       seller.publicKey,
       mint,
@@ -170,7 +242,10 @@ export class PumpFunSDK {
       [seller],
       priorityFees,
       commitment,
-      finality
+      finality,
+      jitoConfig?.jitoEnabled,
+      jitoConfig?.tipLampports,
+      jitoConfig?.endpoint
     );
     return sellResults;
   }
